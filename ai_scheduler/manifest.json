@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "AI Scheduler",
+  "version": "0.1",
+  "description": "An AI-powered scheduler that integrates with Google Calendar.",
+  "permissions": ["storage", "identity"],
+  "host_permissions": [
+    "https://www.googleapis.com/"
+  ],
+  "oauth2": {
+    "client_id": "945525562223-37hef7tbakak21vq6ce05h03bd8g7mte.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/calendar.events"
+    ]
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  }
+} 
