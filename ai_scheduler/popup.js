@@ -1,3 +1,5 @@
+import { minutesBetween, formatTime, parseEventTimes } from './utils.js';
+
 const SCOPES = 'https://www.googleapis.com/auth/calendar.readonly';
 let todayEvents = [];
 
@@ -188,13 +190,6 @@ function getTodayTimeBounds(customNow) {
   return { now, startOfDay, endOfDay };
 }
 
-function parseEventTimes(event) {
-  return {
-    start: new Date(event.start.dateTime),
-    end: new Date(event.end.dateTime)
-  };
-}
-
 function findOpenTimeSlots(events, customNow) {
   const { now, endOfDay } = getTodayTimeBounds(customNow);
   const slots = [];
@@ -210,14 +205,6 @@ function findOpenTimeSlots(events, customNow) {
     slots.push({ start: new Date(lastEnd), end: new Date(endOfDay) });
   }
   return slots;
-}
-
-function minutesBetween(a, b) {
-  return Math.floor((b - a) / 60000);
-}
-
-function formatTime(dt) {
-  return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function getScheduleStorageKey() {
@@ -236,6 +223,11 @@ function getScheduleStorageKey() {
 
 function saveSchedule(scheduled, unscheduled) {
   const key = getScheduleStorageKey();
+  // Save the last used time for persistence
+  const timeInput = document.getElementById('schedule-start-time');
+  if (timeInput && timeInput.value) {
+    chrome.storage.local.set({ last_schedule_time: timeInput.value });
+  }
   // Convert all start/end fields to ISO strings before saving
   const safeScheduled = scheduled.map(item => ({
     ...item,
@@ -304,23 +296,40 @@ function generateSchedule() {
         for (let i = 0; i < slots.length; i++) {
           const slot = slots[i];
           const slotMinutes = minutesBetween(slot.start, slot.end);
-          if (slotMinutes >= task.duration) {
+          let totalNeeded = task.duration;
+          if (pomodoroMode && task.duration > POMO_WORK) {
+            // Calculate number of pomodoros and breaks
+            const numChunks = Math.ceil(task.duration / POMO_WORK);
+            const numBreaks = numChunks - 1;
+            let numLongBreaks = 0;
+            if (numBreaks > 0) {
+              numLongBreaks = Math.floor(numBreaks / POMO_LONG_BREAK_INTERVAL);
+            }
+            const numShortBreaks = numBreaks - numLongBreaks;
+            totalNeeded = task.duration + numShortBreaks * POMO_SHORT_BREAK + numLongBreaks * POMO_LONG_BREAK;
+          } else if (eyeHealthMode && task.duration > EYE_WORK) {
+            const numChunks = Math.ceil(task.duration / EYE_WORK);
+            const numBreaks = numChunks - 1;
+            totalNeeded = task.duration + numBreaks * EYE_BREAK;
+          }
+          if (slotMinutes >= totalNeeded) {
             let taskStart = new Date(slot.start);
             let taskEnd = new Date(taskStart.getTime() + task.duration * 60000);
             // Pomodoro logic for non-splittable tasks
             if (pomodoroMode && task.duration > POMO_WORK) {
               let remaining = task.duration;
               let chunkStart = new Date(taskStart);
+              let localPomoCount = 0;
               while (remaining > 0) {
                 const thisChunk = Math.min(POMO_WORK, remaining);
                 const chunkEnd = new Date(chunkStart.getTime() + thisChunk * 60000);
                 scheduled.push({ ...task, start: chunkStart, end: chunkEnd, chunkDuration: thisChunk });
-                pomoCount++;
+                localPomoCount++;
                 remaining -= thisChunk;
                 chunkStart = new Date(chunkEnd);
                 if (remaining > 0) {
                   // Insert break
-                  let breakDuration = (pomoCount % POMO_LONG_BREAK_INTERVAL === 0) ? POMO_LONG_BREAK : POMO_SHORT_BREAK;
+                  let breakDuration = (localPomoCount % POMO_LONG_BREAK_INTERVAL === 0) ? POMO_LONG_BREAK : POMO_SHORT_BREAK;
                   const breakStart = new Date(chunkStart);
                   const breakEnd = new Date(breakStart.getTime() + breakDuration * 60000);
                   scheduled.push({ name: (breakDuration === POMO_LONG_BREAK ? 'Long Pomodoro Break' : 'Pomodoro Break'), start: breakStart, end: breakEnd, duration: breakDuration, isBreak: true });
@@ -347,10 +356,10 @@ function generateSchedule() {
             } else {
               scheduled.push({ ...task, start: taskStart, end: taskEnd });
             }
-            if (slotMinutes === task.duration) {
+            if (slotMinutes === totalNeeded) {
               slots.splice(i, 1);
             } else {
-              slot.start = new Date(taskEnd);
+              slot.start = new Date(slot.start.getTime() + totalNeeded * 60000);
             }
             placed = true;
             break;
@@ -373,20 +382,25 @@ function generateSchedule() {
                 if (thisChunk < MIN_CHUNK) break;
                 const chunkStart = new Date(slot.start);
                 const chunkEnd = new Date(chunkStart.getTime() + thisChunk * 60000);
+                if (minutesBetween(chunkStart, chunkEnd) > slotMinutes) break;
                 chunks.push({ ...task, start: chunkStart, end: chunkEnd, chunkDuration: thisChunk });
                 pomoCount++;
                 slot.start = new Date(chunkEnd);
                 remaining -= thisChunk;
                 chunkDuration -= thisChunk;
                 slotMinutes = minutesBetween(slot.start, slot.end);
+                // Only add break if there's time for it in the slot and more task remains
                 if (remaining > 0 && chunkDuration > 0) {
-                  // Insert break
                   let breakDuration = (pomoCount % POMO_LONG_BREAK_INTERVAL === 0) ? POMO_LONG_BREAK : POMO_SHORT_BREAK;
-                  const breakStart = new Date(slot.start);
-                  const breakEnd = new Date(breakStart.getTime() + breakDuration * 60000);
-                  chunks.push({ name: (breakDuration === POMO_LONG_BREAK ? 'Long Pomodoro Break' : 'Pomodoro Break'), start: breakStart, end: breakEnd, duration: breakDuration, isBreak: true });
-                  slot.start = new Date(breakEnd);
-                  slotMinutes = minutesBetween(slot.start, slot.end);
+                  if (slotMinutes >= breakDuration) {
+                    const breakStart = new Date(slot.start);
+                    const breakEnd = new Date(breakStart.getTime() + breakDuration * 60000);
+                    chunks.push({ name: (breakDuration === POMO_LONG_BREAK ? 'Long Pomodoro Break' : 'Pomodoro Break'), start: breakStart, end: breakEnd, duration: breakDuration, isBreak: true });
+                    slot.start = new Date(breakEnd);
+                    slotMinutes = minutesBetween(slot.start, slot.end);
+                  } else {
+                    break;
+                  }
                 }
               }
             } else if (eyeHealthMode) {
@@ -395,18 +409,23 @@ function generateSchedule() {
                 if (thisChunk < MIN_CHUNK) break;
                 const chunkStart = new Date(slot.start);
                 const chunkEnd = new Date(chunkStart.getTime() + thisChunk * 60000);
+                if (minutesBetween(chunkStart, chunkEnd) > slotMinutes) break;
                 chunks.push({ ...task, start: chunkStart, end: chunkEnd, chunkDuration: thisChunk });
                 slot.start = new Date(chunkEnd);
                 remaining -= thisChunk;
                 chunkDuration -= thisChunk;
                 slotMinutes = minutesBetween(slot.start, slot.end);
+                // Only add break if there's time for it in the slot and more task remains
                 if (remaining > 0 && chunkDuration > 0) {
-                  // Insert Eye Health break
-                  const breakStart = new Date(slot.start);
-                  const breakEnd = new Date(breakStart.getTime() + EYE_BREAK * 60000);
-                  chunks.push({ name: 'Eye Health Break', start: breakStart, end: breakEnd, duration: EYE_BREAK, isBreak: true });
-                  slot.start = new Date(breakEnd);
-                  slotMinutes = minutesBetween(slot.start, slot.end);
+                  if (slotMinutes >= EYE_BREAK) {
+                    const breakStart = new Date(slot.start);
+                    const breakEnd = new Date(breakStart.getTime() + EYE_BREAK * 60000);
+                    chunks.push({ name: 'Eye Health Break', start: breakStart, end: breakEnd, duration: EYE_BREAK, isBreak: true });
+                    slot.start = new Date(breakEnd);
+                    slotMinutes = minutesBetween(slot.start, slot.end);
+                  } else {
+                    break;
+                  }
                 }
               }
             } else {
@@ -551,4 +570,13 @@ document.addEventListener('DOMContentLoaded', function() {
   if (addToCalBtn) {
     addToCalBtn.addEventListener('click', addScheduleToGoogleCalendar);
   }
+
+  // On popup load, set the time input to the last used time if available
+  chrome.storage.local.get(['last_schedule_time'], function(result) {
+    if (result.last_schedule_time) {
+      timeInput.value = result.last_schedule_time;
+    }
+    // Now load the schedule for this time
+    loadScheduleAndDisplay();
+  });
 }); 
