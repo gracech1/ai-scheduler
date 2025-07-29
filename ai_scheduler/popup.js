@@ -259,6 +259,19 @@ function clearSchedule() {
 }
 
 function generateSchedule() {
+  // Check which mode is active
+  const pomodoroMode = document.getElementById('pomodoro-mode')?.checked;
+  const eyeHealthMode = document.getElementById('eyehealth-mode')?.checked;
+  const rlMode = document.getElementById('rl-mode')?.checked;
+  
+  if (rlMode) {
+    rlGenerateSchedule();
+  } else {
+    traditionalGenerateSchedule();
+  }
+}
+
+function traditionalGenerateSchedule() {
   // Get custom start time from input
   const timeInput = document.getElementById('schedule-start-time');
   let customNow = null;
@@ -457,26 +470,265 @@ function generateSchedule() {
   });
 }
 
+async function rlGenerateSchedule() {
+  // Import RL agent dynamically when needed
+  const { SchedulerRL } = await import('./rl.js');
+  const rlAgent = new SchedulerRL();
+  
+  // Get custom start time from input
+  const timeInput = document.getElementById('schedule-start-time');
+  let customNow = null;
+  if (timeInput && timeInput.value) {
+    const [h, m] = timeInput.value.split(':');
+    customNow = new Date();
+    customNow.setHours(parseInt(h), parseInt(m), 0, 0);
+  }
+  
+  try {
+    // Get RL action (break strategy)
+    const actionResult = await rlAgent.chooseAction();
+    const { action, state, isExploration } = actionResult;
+    
+    console.log(`RL Agent chose action: ${action} (exploration: ${isExploration})`);
+    
+    // Store the chosen action for later reward calculation
+    window.lastRLState = state;
+    window.lastRLAction = action;
+    
+    // Get break configuration from RL agent
+    const breakConfig = rlAgent.getBreakConfig(action);
+    
+    // Use RL scheduling logic here
+    chrome.storage.local.get(['tasks'], function(result) {
+      const tasks = (result.tasks || []).filter(t => !t.completed);
+      const events = todayEvents.slice();
+      events.sort((a, b) => new Date(a.start.dateTime) - new Date(b.start.dateTime));
+      const slots = findOpenTimeSlots(events, customNow);
+      const scheduled = [];
+      const unscheduled = [];
+      
+      // RL scheduling logic with proper splittable task handling
+      let consecutiveTasks = 0;
+      const MIN_CHUNK = 5; // minimum chunk size in minutes
+      
+      for (const task of tasks) {
+        if (!task.splittable) {
+          // Non-splittable: must fit in one slot
+          let placed = false;
+          
+          for (let i = 0; i < slots.length; i++) {
+            const slot = slots[i];
+            const slotMinutes = minutesBetween(slot.start, slot.end);
+            
+            // Check if we need to add a break before this task
+            if (breakConfig.breakDuration > 0 && consecutiveTasks >= breakConfig.breakInterval) {
+              if (slotMinutes >= breakConfig.breakDuration + task.duration) {
+                // Add break first
+                const breakStart = new Date(slot.start);
+                const breakEnd = new Date(breakStart.getTime() + breakConfig.breakDuration * 60000);
+                scheduled.push({ 
+                  name: `AI Break (${breakConfig.breakDuration}min)`, 
+                  start: breakStart, 
+                  end: breakEnd, 
+                  duration: breakConfig.breakDuration, 
+                  isBreak: true 
+                });
+                
+                // Then add the task
+                const taskStart = new Date(breakEnd);
+                const taskEnd = new Date(taskStart.getTime() + task.duration * 60000);
+                scheduled.push({ ...task, start: taskStart, end: taskEnd });
+                consecutiveTasks = 1; // Reset to 1 since we just added a task
+                
+                // Update slot
+                slot.start = new Date(taskEnd);
+                if (minutesBetween(slot.start, slot.end) < MIN_CHUNK) {
+                  slots.splice(i, 1);
+                }
+                placed = true;
+                break;
+              }
+            } else if (slotMinutes >= task.duration) {
+              // No break needed, just add the task
+              const taskStart = new Date(slot.start);
+              const taskEnd = new Date(taskStart.getTime() + task.duration * 60000);
+              scheduled.push({ ...task, start: taskStart, end: taskEnd });
+              consecutiveTasks++;
+              
+              // Update slot
+              slot.start = new Date(taskEnd);
+              if (minutesBetween(slot.start, slot.end) < MIN_CHUNK) {
+                slots.splice(i, 1);
+              }
+              placed = true;
+              break;
+            }
+          }
+          if (!placed) unscheduled.push(task);
+        } else {
+          // Splittable: can be split across multiple slots
+          let remaining = task.duration;
+          let chunks = [];
+          let slotIdx = 0;
+          
+          while (remaining >= MIN_CHUNK && slotIdx < slots.length) {
+            const slot = slots[slotIdx];
+            let slotMinutes = minutesBetween(slot.start, slot.end);
+            
+            if (slotMinutes >= MIN_CHUNK) {
+              // Check if we need to add a break
+              if (breakConfig.breakDuration > 0 && consecutiveTasks >= breakConfig.breakInterval) {
+                if (slotMinutes >= breakConfig.breakDuration + MIN_CHUNK) {
+                  // Add break first
+                  const breakStart = new Date(slot.start);
+                  const breakEnd = new Date(breakStart.getTime() + breakConfig.breakDuration * 60000);
+                  chunks.push({ 
+                    name: `AI Break (${breakConfig.breakDuration}min)`, 
+                    start: breakStart, 
+                    end: breakEnd, 
+                    duration: breakConfig.breakDuration, 
+                    isBreak: true 
+                  });
+                  slot.start = new Date(breakEnd);
+                  slotMinutes = minutesBetween(slot.start, slot.end);
+                  consecutiveTasks = 0;
+                }
+              }
+              
+              // Now add task chunk
+              let chunkDuration = Math.min(slotMinutes, remaining);
+              if (chunkDuration >= MIN_CHUNK) {
+                const chunkStart = new Date(slot.start);
+                const chunkEnd = new Date(chunkStart.getTime() + chunkDuration * 60000);
+                chunks.push({ ...task, start: chunkStart, end: chunkEnd, chunkDuration });
+                consecutiveTasks++;
+                slot.start = new Date(chunkEnd);
+                remaining -= chunkDuration;
+              }
+            }
+            
+            // Check if slot is still usable
+            if (minutesBetween(slot.start, slot.end) < MIN_CHUNK) {
+              slots.splice(slotIdx, 1);
+            } else {
+              slotIdx++;
+            }
+          }
+          
+          if (chunks.length > 0) {
+            scheduled.push(...chunks);
+          }
+          if (remaining > 0) {
+            unscheduled.push({ ...task, duration: remaining });
+          }
+        }
+      }
+      
+      // Sort scheduled items by start time before displaying
+      scheduled.sort((a, b) => {
+        const startA = (a.start instanceof Date) ? a.start : new Date(a.start);
+        const startB = (b.start instanceof Date) ? b.start : new Date(b.start);
+        return startA.getTime() - startB.getTime();
+      });
+      
+      displayProposedSchedule(scheduled, unscheduled);
+      saveSchedule(scheduled, unscheduled);
+      
+      // Show RL info to user
+      showRLInfo(action, isExploration);
+    });
+    
+  } catch (error) {
+    console.error('RL scheduling failed:', error);
+    // Fallback to traditional scheduling
+    traditionalGenerateSchedule();
+  }
+}
+
+// Helper function to find break slot
+function findBreakSlot(slots) {
+  for (let i = 0; i < slots.length; i++) {
+    if (minutesBetween(slots[i].start, slots[i].end) >= 15) {
+      return slots[i];
+    }
+  }
+  return null;
+}
+
 function displayProposedSchedule(scheduled, unscheduled) {
   const container = document.getElementById('proposed-schedule');
   container.innerHTML = '';
-  if (scheduled.length === 0) {
-    container.innerHTML = '<p>No tasks could be scheduled for today.</p>';
+  
+  // Combine scheduled tasks with calendar events
+  const allItems = [];
+  
+  // Add scheduled tasks
+  if (scheduled.length > 0) {
+    allItems.push(...scheduled.map(item => ({ ...item, type: 'scheduled' })));
+  }
+  
+  // Add calendar events
+  if (todayEvents && todayEvents.length > 0) {
+    const calendarItems = todayEvents.map(event => {
+      const start = new Date(event.start.dateTime);
+      const end = new Date(event.end.dateTime);
+      const duration = Math.round((end.getTime() - start.getTime()) / (1000 * 60));
+      return {
+        name: event.summary,
+        start: start,
+        end: end,
+        duration: duration,
+        type: 'calendar',
+        isBreak: false
+      };
+    });
+    allItems.push(...calendarItems);
+  }
+  
+  if (allItems.length === 0) {
+    container.innerHTML = '<p>No tasks or events scheduled for today.</p>';
     return;
   }
+  
+  // Sort all items by start time
+  allItems.sort((a, b) => {
+    const startA = (a.start instanceof Date) ? a.start : new Date(a.start);
+    const startB = (b.start instanceof Date) ? b.start : new Date(b.start);
+    return startA.getTime() - startB.getTime();
+  });
+  
   const list = document.createElement('ul');
-  scheduled.forEach(item => {
+  allItems.forEach(item => {
     // Always convert start and end to Date objects from ISO string
     const start = (item.start instanceof Date) ? item.start : new Date(item.start);
     const end = (item.end instanceof Date) ? item.end : new Date(item.end);
+    
+    // Calculate actual duration in minutes
+    const actualDuration = Math.round((end.getTime() - start.getTime()) / (1000 * 60));
+    
     const li = document.createElement('li');
-    li.innerHTML = `<strong>${item.name}</strong> <br><small>${formatTime(start)} - ${formatTime(end)} (${item.duration || item.chunkDuration} min)</small>`;
+    li.className = 'schedule-item';
+    
+    // Apply different styling based on item type
+    if (item.type === 'calendar') {
+      li.classList.add('calendar');
+      li.innerHTML = `<strong>📅 ${item.name}</strong> <br><small>${formatTime(start)} - ${formatTime(end)} (${actualDuration} min)</small>`;
+    } else if (item.isBreak) {
+      li.classList.add('break');
+      li.innerHTML = `<strong>☕ ${item.name}</strong> <br><small>${formatTime(start)} - ${formatTime(end)} (${actualDuration} min)</small>`;
+    } else {
+      li.classList.add('task');
+      li.innerHTML = `<strong>📝 ${item.name}</strong> <br><small>${formatTime(start)} - ${formatTime(end)} (${actualDuration} min)</small>`;
+    }
+    
     list.appendChild(li);
   });
   container.appendChild(list);
+  
   if (unscheduled.length > 0) {
     const unsched = document.createElement('div');
-    unsched.innerHTML = '<em>Unscheduled tasks:</em> ' + unscheduled.map(t => t.name).join(', ');
+    unsched.className = 'unscheduled-tasks';
+    unsched.innerHTML = '<em>❌ Unscheduled tasks:</em> ' + unscheduled.map(t => t.name).join(', ');
     container.appendChild(unsched);
   }
 }
@@ -529,6 +781,99 @@ async function addScheduleToGoogleCalendar() {
   });
 }
 
+// Show RL information to user
+function showRLInfo(action, isExploration) {
+  const actionNames = {
+    'short_frequent': 'Short Frequent Breaks (5min every 2 tasks)',
+    'short_balanced': 'Short Balanced Breaks (10min every 3 tasks)',
+    'long_balanced': 'Long Balanced Breaks (15min every 3 tasks)',
+    'long_infrequent': 'Long Infrequent Breaks (20min every 4 tasks)',
+    'no_breaks': 'No Breaks (Work-Heavy)',
+    'adaptive_breaks': 'Adaptive Breaks (Time-Based)'
+  };
+  
+  // Update the HTML elements
+  document.getElementById('rl-strategy').textContent = `Strategy: ${actionNames[action] || action}`;
+  document.getElementById('rl-mode-indicator').textContent = `Mode: ${isExploration ? '🔍 Exploring' : '🎯 Exploiting'}`;
+  
+  // Show the feedback section
+  document.getElementById('rl-feedback-section').style.display = 'block';
+  
+  // Hide any previous feedback message
+  document.getElementById('feedback-message').style.display = 'none';
+}
+
+// Handle user feedback and update RL model
+async function provideFeedback(feedback) {
+  try {
+    const { SchedulerRL } = await import('./rl.js');
+    const rlAgent = new SchedulerRL();
+    
+    // Get current schedule from storage
+    const key = getScheduleStorageKey();
+    chrome.storage.local.get([key], async function(result) {
+      if (!result[key]) return;
+      
+      const scheduledTasks = result[key].scheduled || [];
+      const unscheduledTasks = result[key].unscheduled || [];
+      
+      // Get completed tasks (you'll need to implement task completion tracking)
+      const completedTasks = await getCompletedTasks(scheduledTasks);
+      
+      // Calculate reward
+      const reward = rlAgent.calculateReward(feedback, scheduledTasks, completedTasks, unscheduledTasks);
+      
+      // Get next state (current state after this schedule)
+      const nextState = await rlAgent.getState();
+      
+      // Update Q-value
+      if (window.lastRLState && window.lastRLAction) {
+        rlAgent.updateQValue(window.lastRLState, window.lastRLAction, reward, nextState);
+        rlAgent.updateExplorationRate();
+        rlAgent.episodeCount++;
+        
+        console.log(`RL Update: Reward=${reward}, Episode=${rlAgent.episodeCount}`);
+        
+        // Show feedback confirmation using HTML element
+        const feedbackMsg = document.getElementById('feedback-message');
+        feedbackMsg.textContent = 'Thank you for your feedback! The AI is learning...';
+        feedbackMsg.style.color = feedback === 'good' ? '#4caf50' : feedback === 'okay' ? '#ff9800' : '#f44336';
+        feedbackMsg.style.display = 'block';
+        
+        // Hide feedback buttons after 2 seconds
+        setTimeout(() => {
+          document.getElementById('rl-feedback-section').style.display = 'none';
+        }, 2000);
+      }
+    });
+  } catch (error) {
+    console.error('Error providing feedback:', error);
+  }
+}
+
+// Display RL statistics
+async function displayRLStats() {
+  try {
+    const { SchedulerRL } = await import('./rl.js');
+    const rlAgent = new SchedulerRL();
+    const stats = rlAgent.getStats();
+    
+    // Update the HTML elements
+    document.getElementById('episode-count').textContent = stats.episodeCount;
+    document.getElementById('qtable-size').textContent = stats.qTableSize;
+    document.getElementById('exploration-rate').textContent = (stats.explorationRate * 100).toFixed(1);
+    
+    // Show the section if RL mode is enabled
+    const rlMode = document.getElementById('rl-mode')?.checked;
+    const statsSection = document.getElementById('rl-stats-section');
+    if (rlMode) {
+      statsSection.style.display = 'block';
+    }
+  } catch (error) {
+    console.error('Error displaying RL stats:', error);
+  }
+}
+
 // Event listeners
 document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('auth-btn').addEventListener('click', authenticateAndFetchEvents);
@@ -554,15 +899,36 @@ document.addEventListener('DOMContentLoaded', function() {
     loadScheduleAndDisplay();
   }
 
-  // Ensure Pomodoro and Eye Health modes are mutually exclusive
+  // Ensure Pomodoro, Eye Health, and RL modes are mutually exclusive
   const pomo = document.getElementById('pomodoro-mode');
   const eye = document.getElementById('eyehealth-mode');
-  if (pomo && eye) {
+  const rl = document.getElementById('rl-mode');
+  if (pomo && eye && rl) {
     pomo.addEventListener('change', function() {
-      if (pomo.checked) eye.checked = false;
+      if (pomo.checked) {
+        eye.checked = false;
+        rl.checked = false;
+        document.getElementById('rl-stats-section').style.display = 'none';
+        document.getElementById('rl-feedback-section').style.display = 'none';
+      }
     });
     eye.addEventListener('change', function() {
-      if (eye.checked) pomo.checked = false;
+      if (eye.checked) {
+        pomo.checked = false;
+        rl.checked = false;
+        document.getElementById('rl-stats-section').style.display = 'none';
+        document.getElementById('rl-feedback-section').style.display = 'none';
+      }
+    });
+    rl.addEventListener('change', function() {
+      if (rl.checked) {
+        pomo.checked = false;
+        eye.checked = false;
+        displayRLStats();
+      } else {
+        document.getElementById('rl-stats-section').style.display = 'none';
+        document.getElementById('rl-feedback-section').style.display = 'none';
+      }
     });
   }
 
@@ -570,6 +936,21 @@ document.addEventListener('DOMContentLoaded', function() {
   if (addToCalBtn) {
     addToCalBtn.addEventListener('click', addScheduleToGoogleCalendar);
   }
+
+  // Add reset RL button event listener
+  const resetRLBtn = document.getElementById('reset-rl-btn');
+  if (resetRLBtn) {
+    resetRLBtn.addEventListener('click', resetRLLearning);
+  }
+
+  // Add feedback button event listeners
+  const feedbackGood = document.getElementById('feedback-good');
+  const feedbackOkay = document.getElementById('feedback-okay');
+  const feedbackBad = document.getElementById('feedback-bad');
+  
+  if (feedbackGood) feedbackGood.addEventListener('click', () => provideFeedback('good'));
+  if (feedbackOkay) feedbackOkay.addEventListener('click', () => provideFeedback('okay'));
+  if (feedbackBad) feedbackBad.addEventListener('click', () => provideFeedback('bad'));
 
   // On popup load, set the time input to the last used time if available
   chrome.storage.local.get(['last_schedule_time'], function(result) {

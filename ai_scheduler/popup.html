@@ -85,6 +85,48 @@
         min-width: 16px;
         max-width: 16px;
       }
+      
+      /* Schedule item styling */
+      .schedule-item {
+        padding: 8px;
+        margin: 4px 0;
+        border-radius: 4px;
+        border-left: 4px solid;
+      }
+      .schedule-item.calendar {
+        background-color: #f0f8ff;
+        border-left-color: #4285f4;
+      }
+      .schedule-item.calendar strong {
+        color: #4285f4;
+      }
+      .schedule-item.task {
+        background-color: #f1f8e9;
+        border-left-color: #4caf50;
+      }
+      .schedule-item.task strong {
+        color: #4caf50;
+      }
+      .schedule-item.break {
+        background-color: #fff3e0;
+        border-left-color: #ff9800;
+      }
+      .schedule-item.break strong {
+        color: #ff9800;
+      }
+      .schedule-item small {
+        color: #666;
+      }
+      .unscheduled-tasks {
+        margin-top: 10px;
+        padding: 8px;
+        background-color: #ffebee;
+        border-left: 4px solid #f44336;
+        border-radius: 4px;
+      }
+      .unscheduled-tasks em {
+        color: #f44336;
+      }
     </style>
   </head>
   <body>
@@ -136,9 +178,39 @@
         <input type="checkbox" id="eyehealth-mode" style="margin-right: 6px; width: 16px; min-width: 16px; max-width: 16px;">
         <label for="eyehealth-mode" style="font-weight:normal; margin: 0;">Eye Health Mode</label>
       </div>
+      <div class="form-group" style="display: flex; align-items: center; margin-bottom: 8px;">
+        <input type="checkbox" id="rl-mode" style="margin-right: 6px; width: 16px; min-width: 16px; max-width: 16px;">
+        <label for="rl-mode" style="font-weight:normal; margin: 0;">🤖 AI Learning Mode</label>
+      </div>
       <button id="generate-schedule-btn">Generate Schedule</button>
       <div id="proposed-schedule"></div>
+      
+      <!-- RL Feedback Section -->
+      <div id="rl-feedback-section" style="display: none; margin-top: 10px; padding: 8px; background-color: #f0f8ff; border-radius: 4px; border: 1px solid #ddd;">
+        <strong>🤖 AI Learning Mode Active</strong><br>
+        <small id="rl-strategy">Strategy: Loading...</small><br>
+        <small id="rl-mode-indicator">Mode: Loading...</small><br>
+        <div style="margin-top: 8px;">
+          <button id="feedback-good" style="background-color: #4caf50; margin-right: 5px;">👍 Good</button>
+          <button id="feedback-okay" style="background-color: #ff9800; margin-right: 5px;">😐 Okay</button>
+          <button id="feedback-bad" style="background-color: #f44336;">👎 Bad</button>
+        </div>
+        <div id="feedback-message" style="margin-top: 5px; display: none;"></div>
+      </div>
+      
       <button id="add-to-calendar-btn" style="margin-top: 10px; width: 100%;">Add to Google Calendar</button>
+    </div>
+
+    <!-- RL Statistics Section -->
+    <div class="section" id="rl-stats-section" style="display: none;">
+      <h2>🤖 AI Learning Statistics</h2>
+      <div id="rl-stats">
+        <p><strong>Learning Episodes:</strong> <span id="episode-count">0</span></p>
+        <p><strong>Knowledge Base Size:</strong> <span id="qtable-size">0</span> states</p>
+        <p><strong>Exploration Rate:</strong> <span id="exploration-rate">30.0</span>%</p>
+        <p><small>Higher exploration = more experimentation</small></p>
+      </div>
+      <button id="reset-rl-btn" style="background-color: #f44336; margin-top: 10px;">Reset AI Learning</button>
     </div>
 
     <script type="module" src="popup.js"></script>
